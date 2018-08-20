@@ -4,6 +4,7 @@ import requests
 import urlparse
 import logging
 import hashlib
+import functools
 
 from mopidy import backend, models
 import types
@@ -19,6 +20,7 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_1) AppleWebKit/537.36
 
 URI_ROOT = "qobuz:directory"
 URI_ALBUMS = "qobuz:album"
+URI_TRACKS = "qobuz:track"
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,13 @@ def api(p):
 def to_album_ref(album):
     return models.Ref.album(uri="%s:%s" % (URI_ALBUMS, album["id"]),
                             name=album["title"])
+
+def mk_track_uri(album_id, track_id):
+    return "%s:%s:%s" % (URI_TRACKS, album_id, str(track_id))
+
+def to_track_ref(album_id, track):
+    return models.Ref.track(uri=mk_track_uri(album_id, track["id"]),
+                            name=track["title"])
 
 class QobuzRequestsSession(requests.Session):
     def __init__(self, app_id, app_secret, user_auth_token):
@@ -107,10 +116,17 @@ class QobuzLibraryProvider(backend.LibraryProvider):
             return self._root
         elif uri == URI_ALBUMS:
             return self._browse_albums()
+        elif uri.startswith("%s:" % URI_ALBUMS):
+            album_id = uri.split(':')[2]
+            return self._browse_album(album_id)
+
         return []
 
     def lookup(self, uri):
-        logger.debug("Looking up URI %s", uri)
+        logger.error("Looking up URI %s", uri)
+        if uri.startswith("%s:" % URI_TRACKS):
+            track_id = uri.split(':')[3]
+            return self._lookup_track(track_id)
         return []
 
     def _browse_albums(self):
@@ -118,3 +134,24 @@ class QobuzLibraryProvider(backend.LibraryProvider):
         album_list_req = self.backend.session.get(api("userLibrary/getAlbumsList"))
         album_list = album_list_req.json()["items"]
         return map(to_album_ref, album_list)
+
+    def _browse_album(self, album_id):
+        # github.com/Qobuz/api-documentation/blob/master/endpoints/album/get.md
+        album_req = self.backend.session.get(api("album/get"), params={
+            "album_id": album_id
+        })
+        album = album_req.json()
+        return map(functools.partial(to_track_ref, album_id), album["tracks"]["items"])
+
+    def _lookup_track(self, track_id):
+        # github.com/Qobuz/api-documentation/blob/master/endpoints/track/get.md
+        track_req = self.backend.session.get(api("track/get"), params={
+            "track_id": track_id
+        })
+        track = track_req.json()
+        return [
+            models.Track(
+                uri=mk_track_uri(track["album"]["id"], track["id"]),
+                name=track["title"]
+            )
+        ]
